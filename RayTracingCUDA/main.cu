@@ -16,14 +16,14 @@
 
 namespace
 {
-	constexpr f32 BaseSize = 20;
+	constexpr f32 BaseSize = 200;
 	constexpr u32 ScreenWidth = static_cast<u32>(16 * BaseSize);
 	constexpr u32 ScreenHeight = static_cast<u32>(9 * BaseSize);
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
 	__managed__ vec3 renderTarget[ScreenPixelNum];
 
 	constexpr u32 SampleNum = 50;
-	constexpr u32 Depth = 3;
+	constexpr u32 Depth = 30;
 
 	constexpr f32 MAXFLOAT = FLT_MAX;
 }
@@ -41,7 +41,7 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 	list[actualObjectNum++] = new Sphere(vec3(12, 1, 2), 1.0f, new Metal(vec3(0, 1, 0.9) * 1.0f, 0.0f));
 }
 
-__device__ vec3 getColor(ray r, Hitable* world, const s32 depth, u32 xid, u32 yid)
+__device__ vec3 getColor(ray r, Hitable* world, const s32 depth)
 {
 	HitRecord rec;
 	bool isHit = world->hit(r, 0.001, MAXFLOAT, rec);
@@ -53,7 +53,7 @@ __device__ vec3 getColor(ray r, Hitable* world, const s32 depth, u32 xid, u32 yi
 
 		if (depth >= 0 && rec.pMaterial->scatter(r, rec, attenuation, scattered))
 		{
-			vec3 resultColor = getColor(scattered, world, depth - 1, xid, yid);
+			vec3 resultColor = getColor(scattered, world, depth - 1);
 			return attenuation * resultColor;
 		}
 		else
@@ -69,8 +69,9 @@ __device__ vec3 getColor(ray r, Hitable* world, const s32 depth, u32 xid, u32 yi
 	}
 }
 
-__device__ vec3 getColorFromRay(ray r, Hitable* world, const s32 depth, u32 xid, u32 yid)
+__device__ bool getColorFromRay(ray* pRay, Hitable* world, const s32 depth, vec3* pV)
 {
+	ray r = *pRay;
 	HitRecord rec;
 	bool isHit = world->hit(r, 0.001, MAXFLOAT, rec);
 
@@ -79,35 +80,44 @@ __device__ vec3 getColorFromRay(ray r, Hitable* world, const s32 depth, u32 xid,
 		ray scattered;
 		vec3 attenuation;
 
-		if (depth >= 0 && rec.pMaterial->scatter(r, rec, attenuation, scattered))
+		if (depth < Depth && rec.pMaterial->scatter(r, rec, attenuation, scattered))
 		{
-			vec3 resultColor = getColor(scattered, world, depth - 1, xid, yid);
-			return attenuation * resultColor;
+			*pV = attenuation;
+			*pRay = scattered;
+			return false;
 		}
 		else
 		{
-			return vec3(0, 0, 0);
+			*pV = vec3(0, 0, 0);
+			return true;
 		}
 	}
 	else
 	{
 		vec3 unitDirection = normalize(r.direction());
 		float t = 0.5f * (unitDirection.y() + 1.0f);
-		return vec3(1.0f, 1.0f, 1.0f) * (1.0f - t) + vec3(0.5f, 0.7f, 1.0f) * t;
+		*pV = vec3(1.0f, 1.0f, 1.0f) * (1.0f - t) + vec3(0.5f, 0.7f, 1.0f) * t;
+		return true;
 	}
 }
 
-__device__ vec3 collectColor(ray r, Hitable* world, const s32 depth, u32 xid, u32 yid)
+__device__ vec3 collectColor(ray r, Hitable* world)
 {
 	vec3 resultColor(1,1,1);
 
-	for (u32 loop = 0; loop < Depth; loop++)
+	ray currentRay = r;
+
+	for (u32 depth = 0; depth < Depth; depth++)
 	{
 		vec3 colorFromThisRay;
-
-
-
+		bool isRayTerminated = getColorFromRay(&currentRay, world, depth, &colorFromThisRay);
 		resultColor *= colorFromThisRay;
+
+		if (isRayTerminated)
+		{
+			break;
+		}
+
 	}
 
 	return resultColor;
@@ -131,7 +141,7 @@ __global__ void castRayToWorld(Camera camera, Hitable* world)
 		f32 y = (static_cast<f32>(yid) + (srandomF64() * 0.5))/ (ScreenHeight - 1);
 
 		ray r = camera.getRay(x, y);
-		vec3 resultColor = getColor(r, world, Depth, xid, yid);
+		vec3 resultColor = collectColor(r, world);
 		color += resultColor;
 	}
 
