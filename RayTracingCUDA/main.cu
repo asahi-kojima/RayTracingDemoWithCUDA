@@ -17,14 +17,14 @@
 
 namespace
 {
-	constexpr f32 BaseResolution = 1500;
+	constexpr f32 BaseResolution = 2000;
 	constexpr u32 ScreenWidth = static_cast<u32>(1.960 * BaseResolution);
 	constexpr u32 ScreenHeight = static_cast<u32>(1.080 * BaseResolution);
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
 	__managed__ vec3 renderTarget[ScreenPixelNum];
 
-	constexpr u32 SampleNum = 30;
-	constexpr u32 Depth = 30;
+	constexpr u32 SampleNum = 50;
+	constexpr u32 Depth = 50;
 
 	constexpr f32 MAXFLOAT = FLT_MAX;
 }
@@ -32,6 +32,7 @@ namespace
 
 __device__ Camera camera;
 __device__ Hitable* world;
+__device__ curandState s;
 
 __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actualObjectNum)
 {
@@ -40,23 +41,26 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 	list[actualObjectNum++] = new Sphere(vec3(-8, 1, 0), 1.0f, new Metal(vec3(1, 1, 0.2) * 0.8f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(-4, 1, 0), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(0, 1, 0), 1.0f, new Metal(vec3(1, 1, 1), 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), 1.0f, new Dielectric(1.5f));
+	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), -0.9f, new Dielectric(1.5f));
 	list[actualObjectNum++] = new Sphere(vec3(8, 1, 0), 1.0f, new Metal(vec3(0, 1, 0.9) * 0.8f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(12, 1, 2), 1.0f, new Metal(vec3(0, 1, 0.9) * 1.0f, 0.0f));
 
-	const s32 objectMaxNum = 10;
-	curandState s;
-	curand_init(0, objectMaxNum * objectMaxNum * 20, 0, &s);
+	const s32 objectNumPerEdge = 10;
+	const s32 objectRange = 10;
+	const s32 distBetweenOjbects = objectRange * 2.0f / objectNumPerEdge;
+	curandState sLocal;
+	curand_init(0, objectNumPerEdge * objectNumPerEdge * 20, 0, &sLocal);
 
-	for (s32 a = -objectMaxNum; a < objectMaxNum; a++)
+	for (s32 a = -objectRange; a < objectRange; a+= distBetweenOjbects)
 	{
-		for (s32 b = -objectMaxNum; b < objectMaxNum; b++)
+		for (s32 b = -objectRange; b < objectRange; b+= distBetweenOjbects)
 		{
-			vec3 center(a + curand_uniform(&s), 0.2, b + curand_uniform(&s));
+			vec3 center(a + curand_uniform(&sLocal), 0.2, b + curand_uniform(&sLocal));
 
-			//if ((center - vec3(4, 0.2f, 0)).length() > 0.9f)
+			if ((center - vec3(4, 0.2f, 0)).length() > 0.9f)
 			{
-				list[actualObjectNum++] = new Sphere(center, 0.2, new Metal(vec3(curand_uniform(&s), curand_uniform(&s), curand_uniform(&s)), curand_uniform(&s)));
+				list[actualObjectNum++] = new Sphere(center, 0.2, new Metal(vec3(curand_uniform(&sLocal), curand_uniform(&sLocal), curand_uniform(&sLocal)), curand_uniform(&sLocal)));
 			}
 		}
 	}
@@ -66,6 +70,8 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 
 __global__ void prepare()
 {
+	curand_init(0, static_cast<unsigned long long>(1000000000), 0, &s);
+
 	vec3 lookFrom(13, 2, 5);
 	vec3 lookAt(0, 0, 0);
 	camera = Camera(lookFrom, lookAt, vec3(0, 1, 0), 20, static_cast<f32>(ScreenWidth) / static_cast<f32>(ScreenHeight), 0.01, (lookFrom - lookAt).length());
@@ -83,9 +89,8 @@ __device__ bool getColorFromRay(ray* pRay, Hitable* world, const s32 depth, vec3
 {
 	ray r = *pRay;
 	HitRecord rec;
-	bool isHit = world->hit(r, 0.001, MAXFLOAT, rec);
 
-	if (isHit)
+	if (world->hit(r, 0.001, MAXFLOAT, rec))
 	{
 		ray scattered;
 		vec3 attenuation;
@@ -116,7 +121,7 @@ __device__ vec3 collectColor(const ray& r, Hitable* world)
 	vec3 resultColor(1, 1, 1);
 
 	ray currentRay = r;
-	f32 d = 0;
+	f32 d;
 	for (u32 depth = 0; depth < Depth; depth++)
 	{
 		d = depth;
@@ -129,9 +134,7 @@ __device__ vec3 collectColor(const ray& r, Hitable* world)
 			break;
 		}
 	}
-	f32 df = d / Depth;
-	//return vec3(df, df, df);
-
+	return vec3(1,1,1)* (d / (Depth - 1));
 	return resultColor;
 }
 
@@ -146,16 +149,16 @@ __global__ void castRayToWorld()
 		return;
 	}
 
-	curandState s;
-	curand_init(index, 0, 0, &s);
+	curandState sLocal;
+	curand_init(index, 0, 0, &sLocal);
 
 
 	vec3 color(0, 0, 0);
 
 	for (u32 sampleNo = 0; sampleNo < SampleNum; sampleNo++)
 	{
-		f32 x = (static_cast<f32>(xid) + (2 * curand_uniform(&s) - 1) * 0.5) / static_cast<f32>(ScreenWidth - 1);
-		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&s) - 1) * 0.5) / static_cast<f32>(ScreenHeight - 1);
+		f32 x = (static_cast<f32>(xid) + (2 * curand_uniform(&sLocal) - 1) * 0.5) / static_cast<f32>(ScreenWidth - 1);
+		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&sLocal) - 1) * 0.5) / static_cast<f32>(ScreenHeight - 1);
 
 		ray r = camera.getRay(x, y);
 		vec3 resultColor = collectColor(r, world);
