@@ -1,7 +1,9 @@
 ﻿#include <float.h>
-#include "Sphere.h"
-#include "camera.h"
+#include <curand_kernel.h>
 #include <fstream>
+#include "camera.h"
+#include "Sphere.h"
+
 #define CHECK(call)                                                            \
 {                                                                              \
     const cudaError_t error = call;                                            \
@@ -22,7 +24,7 @@ namespace
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
 	__managed__ vec3 renderTarget[ScreenPixelNum];
 
-	constexpr u32 SampleNum = 50;
+	constexpr u32 SampleNum = 10;
 	constexpr u32 Depth = 30;
 
 	constexpr f32 MAXFLOAT = FLT_MAX;
@@ -31,14 +33,31 @@ namespace
 
 __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actualObjectNum)
 {
-	list[actualObjectNum++] = new Sphere(vec3(0, -1000, 0), 1000, new Metal(vec3(0.3, 0.3, 0.3) * 1.0f, 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(-12, 1, 2), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.3f));
-	list[actualObjectNum++] = new Sphere(vec3(-8, 1, 0), 1.0f, new Metal(vec3(1, 1, 0.2) * 0.8f, 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(-4, 1, 0), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.3f));
-	list[actualObjectNum++] = new Sphere(vec3(0, 1, 0), 1.0f, new Metal(vec3(1, 1, 1), 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.3f));
-	list[actualObjectNum++] = new Sphere(vec3(8, 1, 0), 1.0f, new Metal(vec3(0, 1, 0.9) * 0.8f, 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(12, 1, 2), 1.0f, new Metal(vec3(0, 1, 0.9) * 1.0f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(0, -1000, 0), 1000, new Metal(vec3(0.3, 0.3, 0.3) * 1.0f, 0.3f));
+	list[actualObjectNum++] = new Sphere(vec3(-12, 1, 2),	1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.5f));
+	list[actualObjectNum++] = new Sphere(vec3(-8, 1, 0),	1.0f, new Metal(vec3(1, 1, 0.2)		* 0.8f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(-4, 1, 0),	1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(0, 1, 0),		1.0f, new Metal(vec3(1, 1, 1), 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0),		1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(8, 1, 0),		1.0f, new Metal(vec3(0, 1, 0.9)		* 0.8f, 0.1f));
+	list[actualObjectNum++] = new Sphere(vec3(12, 1, 2),	1.0f, new Metal(vec3(0, 1, 0.9)		* 1.0f, 0.0f));
+
+	const u32 objectMaxNum = 10;
+	curandState s;
+	curand_init(0, objectMaxNum * objectMaxNum * 20, 0, &s);
+
+	 for (s32 a = -objectMaxNum; a < objectMaxNum; a++)
+	 {
+	 	for (s32 b = -objectMaxNum; b < objectMaxNum; b++)
+	 	{
+	 		vec3 center(a + 0.9f * curand_uniform(&s), 0.2, b + 0.9 * curand_uniform(&s));
+
+	 		if ((center - vec3(4, 0.2f, 0)).length() > 0.9f)
+	 		{
+	 			list[actualObjectNum++] = new Sphere(center, 0.2, new Metal(vec3(curand_uniform(&s) * curand_uniform(&s), curand_uniform(&s) * curand_uniform(&s), curand_uniform(&s) * curand_uniform(&s))));
+	 		}
+	 	}
+	 }
 }
 
 __device__ vec3 getColor(ray r, Hitable* world, const s32 depth)
@@ -134,7 +153,7 @@ __global__ void castRayToWorld(Camera camera, Hitable* world)
 		return;
 	}
 
-	vec3 color;
+	vec3 color(0,0,0);
 	for (u32 sampleNo = 0; sampleNo < SampleNum; sampleNo++)
 	{
 		f32 x = (static_cast<f32>(xid) + (srandomF64() * 0.5))/ (ScreenWidth - 1);

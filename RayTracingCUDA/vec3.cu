@@ -143,7 +143,7 @@ vec3 vec3::cross(const vec3& b) const
 	vec3 p;
 	do
 	{
-		p = 2.0f * vec3(randomF64(), randomF64(), randomF64()) - vec3(1, 1, 1);
+		p = vec3(srandomF64(), srandomF64(), srandomF64());
 	} while (p.squaredLength() >= 1.0f);
 	return p;
 }

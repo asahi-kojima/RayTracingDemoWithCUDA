@@ -3,6 +3,8 @@
   <ItemGroup>
     <CudaCompile Include="main.cu" />
     <CudaCompile Include="vec3.cu" />
+    <CudaCompile Include="camera.cu" />
+    <CudaCompile Include="util.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="camera.h">

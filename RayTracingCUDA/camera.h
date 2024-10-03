@@ -9,7 +9,7 @@
 class Camera
 {
 public:
-	__host__ __device__ Camera();
+	__host__ __device__ Camera() = default;
 	__host__ __device__ Camera(f32 vfov, f32 aspect);
 	__host__ __device__ Camera(vec3 lookFrom, vec3 lookAt, vec3 vUp, f32 vfov, f32 aspect, f32 aperture = 0, f32 focusDist = 1);
 
