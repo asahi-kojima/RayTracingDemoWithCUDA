@@ -17,18 +17,24 @@
 
 namespace
 {
-	constexpr f32 BaseResolution = 2000;
+	constexpr f32 BaseResolution = 1000;
 	constexpr u32 ScreenWidth = static_cast<u32>(1.960 * BaseResolution);
 	constexpr u32 ScreenHeight = static_cast<u32>(1.080 * BaseResolution);
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
 	__managed__ vec3 renderTarget[ScreenPixelNum];
+	__managed__ f32 depthTarget[ScreenPixelNum];
 
 	constexpr u32 SampleNum = 50;
-	constexpr u32 Depth = 50;
+	constexpr u32 Depth = 30;
 
 	constexpr f32 MAXFLOAT = FLT_MAX;
 }
 
+struct vec4
+{
+	vec3 v;
+	f32 w;
+};
 
 __device__ Camera camera;
 __device__ Hitable* world;
@@ -116,7 +122,7 @@ __device__ bool getColorFromRay(ray* pRay, Hitable* world, const s32 depth, vec3
 	}
 }
 
-__device__ vec3 collectColor(const ray& r, Hitable* world)
+__device__ vec4 collectColor(const ray& r, Hitable* world)
 {
 	vec3 resultColor(1, 1, 1);
 
@@ -134,8 +140,11 @@ __device__ vec3 collectColor(const ray& r, Hitable* world)
 			break;
 		}
 	}
-	return vec3(1,1,1)* (d / (Depth - 1));
-	return resultColor;
+	
+	vec4 v;
+	v.v = resultColor;
+	v.w = d;
+	return v;
 }
 
 __global__ void castRayToWorld()
@@ -154,6 +163,7 @@ __global__ void castRayToWorld()
 
 
 	vec3 color(0, 0, 0);
+	f32 depth = 0;
 
 	for (u32 sampleNo = 0; sampleNo < SampleNum; sampleNo++)
 	{
@@ -161,14 +171,17 @@ __global__ void castRayToWorld()
 		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&sLocal) - 1) * 0.5) / static_cast<f32>(ScreenHeight - 1);
 
 		ray r = camera.getRay(x, y);
-		vec3 resultColor = collectColor(r, world);
-		color += resultColor;
+		vec4 resultColor = collectColor(r, world);
+		color += resultColor.v;
+		depth += resultColor.w;
 	}
 
 
 	color /= SampleNum;
+	depth /= SampleNum;
 
 	renderTarget[index] = color;
+	depthTarget[index] = depth;
 }
 
 
@@ -206,7 +219,7 @@ int main()
 	// 結果をファイルに出力
 	//=======================================================
 	std::ofstream outputFile("renderResult.ppm");
-	outputFile << "P3\n" << ScreenWidth << " " << ScreenHeight << "\n255\n";
+	outputFile << "P3\n" << ScreenWidth * 2 << " " << ScreenHeight  << "\n255\n";
 	for (s32 yid = ScreenHeight - 1; yid >= 0; yid--)
 	{
 		for (u32 xid = 0; xid < ScreenWidth; xid++)
@@ -215,6 +228,14 @@ int main()
 			vec3& col = renderTarget[index];
 			col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
 			outputFile << static_cast<s32>(255.99 * col[0]) << " " << static_cast<s32>(255.99 * col[1]) << " " << static_cast<s32>(255.99 * col[2]) << "\n";
+		}
+		
+		for (u32 xid = 0; xid < ScreenWidth; xid++)
+		{
+			const u32 index = yid * ScreenWidth + xid;
+
+			f32 depth = depthTarget[index] / Depth;
+			outputFile << static_cast<s32>(255.99 * depth) << " " << static_cast<s32>(255.99 * depth) << " " << static_cast<s32>(255.99 * depth) << "\n";
 		}
 	}
 	outputFile.close();
