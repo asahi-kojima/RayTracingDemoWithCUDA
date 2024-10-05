@@ -17,14 +17,14 @@
 
 namespace
 {
-	constexpr f32 BaseResolution = 1000;
+	constexpr f32 BaseResolution = 2000;
 	constexpr u32 ScreenWidth = static_cast<u32>(1.960 * BaseResolution);
 	constexpr u32 ScreenHeight = static_cast<u32>(1.080 * BaseResolution);
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
 	__managed__ vec3 renderTarget[ScreenPixelNum];
 	__managed__ f32 depthTarget[ScreenPixelNum];
 
-	constexpr u32 SampleNum = 50;
+	constexpr u32 SampleNum = 30;
 	constexpr u32 Depth = 30;
 
 	constexpr f32 MAXFLOAT = FLT_MAX;
@@ -38,7 +38,7 @@ struct vec4
 
 __device__ Camera camera;
 __device__ Hitable* world;
-__device__ curandState s;
+__device__ curandState s[32];
 
 __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actualObjectNum)
 {
@@ -52,21 +52,44 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 	list[actualObjectNum++] = new Sphere(vec3(8, 1, 0), 1.0f, new Metal(vec3(0, 1, 0.9) * 0.8f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(12, 1, 2), 1.0f, new Metal(vec3(0, 1, 0.9) * 1.0f, 0.0f));
 
-	const s32 objectNumPerEdge = 10;
-	const s32 objectRange = 10;
-	const s32 distBetweenOjbects = objectRange * 2.0f / objectNumPerEdge;
-	curandState sLocal;
-	curand_init(0, objectNumPerEdge * objectNumPerEdge * 20, 0, &sLocal);
+	const u32 BaseObjectNum = actualObjectNum;
 
-	for (s32 a = -objectRange; a < objectRange; a+= distBetweenOjbects)
+	const s32 objectNumPerEdge = 15;
+	const s32 objectRange = 10;
+	const f32 distBetweenOjbects = objectRange * 2.0f / objectNumPerEdge;
+	curandState sLocal;
+	curand_init(0, 0, 0, &sLocal);
+
+
+	for (f32 a = -objectRange; a < objectRange; a+= distBetweenOjbects)
 	{
-		for (s32 b = -objectRange; b < objectRange; b+= distBetweenOjbects)
+		for (f32 b = -objectRange; b < objectRange; b+= distBetweenOjbects)
 		{
 			vec3 center(a + curand_uniform(&sLocal), 0.2, b + curand_uniform(&sLocal));
 
-			if ((center - vec3(4, 0.2f, 0)).length() > 0.9f)
+			bool isDuplicated = false;
+			for (u32 baseObjIndex = 0; baseObjIndex < BaseObjectNum; baseObjIndex++)
 			{
-				list[actualObjectNum++] = new Sphere(center, 0.2, new Metal(vec3(curand_uniform(&sLocal), curand_uniform(&sLocal), curand_uniform(&sLocal)), curand_uniform(&sLocal)));
+				const Sphere* s = reinterpret_cast<Sphere*>(list[baseObjIndex]);
+				if ((center - s->center).length() < (0.2 + s->radius))
+				{
+					isDuplicated = true;
+					break;
+				}
+			}
+			if (!isDuplicated)
+			{
+				Material* material = nullptr;
+				f32 whichMaterial = curand_uniform(&sLocal);
+				if (whichMaterial < 0.7f)
+				{
+					material = new Metal(vec3(curand_uniform(&sLocal), curand_uniform(&sLocal), curand_uniform(&sLocal)), 0);
+				}
+				else
+				{
+					material = new Dielectric(1+ 2 * curand_uniform(&sLocal));
+				}
+				list[actualObjectNum++] = new Sphere(center, 0.2, material);
 			}
 		}
 	}
@@ -76,7 +99,10 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 
 __global__ void prepare()
 {
-	curand_init(0, static_cast<unsigned long long>(1000000000), 0, &s);
+	for (u32 i = 0; i < 32; i++)
+	{
+		curand_init(i, 0, 0, &s[i]);
+	}
 
 	vec3 lookFrom(13, 2, 5);
 	vec3 lookAt(0, 0, 0);
@@ -167,8 +193,9 @@ __global__ void castRayToWorld()
 
 	for (u32 sampleNo = 0; sampleNo < SampleNum; sampleNo++)
 	{
-		f32 x = (static_cast<f32>(xid) + (2 * curand_uniform(&sLocal) - 1) * 0.5) / static_cast<f32>(ScreenWidth - 1);
-		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&sLocal) - 1) * 0.5) / static_cast<f32>(ScreenHeight - 1);
+		const f32 SampleRangeInPixel = 0.2;
+		f32 x = (static_cast<f32>(xid) + (2 * curand_uniform(&sLocal) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenWidth - 1);
+		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&sLocal) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenHeight - 1);
 
 		ray r = camera.getRay(x, y);
 		vec4 resultColor = collectColor(r, world);
@@ -205,8 +232,8 @@ int main()
 	dim3 block(16, 16);//スレッドブロック
 	dim3 grid((ScreenWidth + block.x - 1) / block.x, (ScreenHeight + block.y - 1) / block.y);
 
-
 	printf("Call castRayToWorld<<<(%d, %d), (%d, %d)>>>\n", grid.x, grid.y, block.x, block.y);
+	cudaDeviceSetLimit(cudaLimitStackSize, 4096);
 	castRayToWorld << <grid, block >> > ();
 	CHECK(cudaDeviceSynchronize());
 
@@ -234,7 +261,7 @@ int main()
 		{
 			const u32 index = yid * ScreenWidth + xid;
 
-			f32 depth = depthTarget[index] / Depth;
+			f32 depth = sqrt(depthTarget[index] / Depth);
 			outputFile << static_cast<s32>(255.99 * depth) << " " << static_cast<s32>(255.99 * depth) << " " << static_cast<s32>(255.99 * depth) << "\n";
 		}
 	}
