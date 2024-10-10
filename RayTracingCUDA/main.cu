@@ -21,13 +21,17 @@ namespace
 	constexpr u32 ScreenWidth = static_cast<u32>(1.960 * BaseResolution);
 	constexpr u32 ScreenHeight = static_cast<u32>(1.080 * BaseResolution);
 	constexpr u32 ScreenPixelNum = ScreenWidth * ScreenHeight;
+	constexpr u32 SampleNum = 32;
+	constexpr u32 Depth = 30;
+	constexpr f32 MAXFLOAT = FLT_MAX;
+
+
 	__managed__ vec3 renderTarget[ScreenPixelNum];
 	__managed__ f32 depthTarget[ScreenPixelNum];
 
-	constexpr u32 SampleNum = 30;
-	constexpr u32 Depth = 30;
+	__managed__ vec3 renderTargetOfSampleRay[ScreenPixelNum * SampleNum];
+	__managed__ f32 depthTargetOfSampleRay[ScreenPixelNum * SampleNum];
 
-	constexpr f32 MAXFLOAT = FLT_MAX;
 }
 
 struct vec4
@@ -45,7 +49,7 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 	list[actualObjectNum++] = new Sphere(vec3(0, -1000, 0), 1000, new Metal(vec3(0.3, 0.3, 0.3) * 1.0f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(-12, 1, 2), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(-8, 1, 0), 1.0f, new Metal(vec3(1, 1, 0.2) * 0.8f, 0.0f));
-	list[actualObjectNum++] = new Sphere(vec3(-4, 1, 0), 1.0f, new Metal(vec3(0.5, 0.8, 0.3) * 0.8f, 0.0f));
+	list[actualObjectNum++] = new Sphere(vec3(-4, 1, 0), 1.0f, new Dielectric(2));
 	list[actualObjectNum++] = new Sphere(vec3(0, 1, 0), 1.0f, new Metal(vec3(1, 1, 1), 0.0f));
 	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), 1.0f, new Dielectric(1.5f));
 	list[actualObjectNum++] = new Sphere(vec3(4, 1, 0), -0.9f, new Dielectric(1.5f));
@@ -61,9 +65,9 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 	curand_init(0, 0, 0, &sLocal);
 
 
-	for (f32 a = -objectRange; a < objectRange; a+= distBetweenOjbects)
+	for (f32 a = -objectRange; a < objectRange; a += distBetweenOjbects)
 	{
-		for (f32 b = -objectRange; b < objectRange; b+= distBetweenOjbects)
+		for (f32 b = -objectRange; b < objectRange; b += distBetweenOjbects)
 		{
 			vec3 center(a + curand_uniform(&sLocal), 0.2, b + curand_uniform(&sLocal));
 
@@ -87,7 +91,7 @@ __device__ void prepareObject(Hitable** list, const u32 MaxObjectNum, u32& actua
 				}
 				else
 				{
-					material = new Dielectric(1+ 2 * curand_uniform(&sLocal));
+					material = new Dielectric(1 + 2 * curand_uniform(&sLocal));
 				}
 				list[actualObjectNum++] = new Sphere(center, 0.2, material);
 			}
@@ -166,14 +170,65 @@ __device__ vec4 collectColor(const ray& r, Hitable* world)
 			break;
 		}
 	}
-	
+
 	vec4 v;
 	v.v = resultColor;
 	v.w = d;
 	return v;
 }
 
+__global__ void castRayForDenoise(const u32 parentPixelIdx, const u32 parentPixelIdy, const u32 index)
+{
+	const u32 sampleID = threadIdx.x;
+	const u32 offset = SampleNum * index + sampleID;
+	if (!(sampleID < SampleNum))
+	{
+		return;
+	}
+
+	const f32 SampleRangeInPixel = 0.2;
+	f32 x = (static_cast<f32>(parentPixelIdx) + (2 * randomF64() - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenWidth - 1);
+	f32 y = (static_cast<f32>(parentPixelIdy) + (2 * randomF64() - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenHeight - 1);
+
+	ray r = camera.getRay(x, y);
+	vec4 resultColor = collectColor(r, world);
+	renderTargetOfSampleRay[offset] = resultColor.v;
+	depthTargetOfSampleRay[offset] = resultColor.w;
+
+	if (threadIdx.x == 0)
+	{
+		renderTarget[index] = resultColor.v;
+		depthTarget[index] = resultColor.w;
+	}
+
+}
+
 __global__ void castRayToWorld()
+{
+	const u32 xid = threadIdx.x + blockDim.x * blockIdx.x;
+	const u32 yid = threadIdx.y + blockDim.y * blockIdx.y;
+	const u32 sampleID = threadIdx.z + blockDim.z * blockIdx.z;
+
+	const u32 index = yid * ScreenWidth + xid;
+	const u32 offset = SampleNum * index + sampleID;
+
+	if (!(xid < ScreenWidth && yid < ScreenHeight && sampleID < SampleNum))
+	{
+		return;
+	}
+
+	const f32 SampleRangeInPixel = 0.01;
+	f32 x = (static_cast<f32>(xid) + (2 * randomF64(sampleID) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenWidth - 1);
+	f32 y = (static_cast<f32>(yid) + (2 * randomF64(sampleID) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenHeight - 1);
+
+	ray r = camera.getRay(x, y);
+	vec4 resultColor = collectColor(r, world);
+
+	renderTargetOfSampleRay[offset] = resultColor.v;
+	depthTargetOfSampleRay[offset] = resultColor.w;
+}
+
+__global__ void sumUp()
 {
 	const u32 xid = threadIdx.x + blockDim.x * blockIdx.x;
 	const u32 yid = threadIdx.y + blockDim.y * blockIdx.y;
@@ -184,25 +239,15 @@ __global__ void castRayToWorld()
 		return;
 	}
 
-	curandState sLocal;
-	curand_init(index, 0, 0, &sLocal);
-
 
 	vec3 color(0, 0, 0);
 	f32 depth = 0;
-
-	for (u32 sampleNo = 0; sampleNo < SampleNum; sampleNo++)
+	for (u32 sampleId = 0; sampleId < SampleNum; sampleId++)
 	{
-		const f32 SampleRangeInPixel = 0.2;
-		f32 x = (static_cast<f32>(xid) + (2 * curand_uniform(&sLocal) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenWidth - 1);
-		f32 y = (static_cast<f32>(yid) + (2 * curand_uniform(&sLocal) - 1) * SampleRangeInPixel) / static_cast<f32>(ScreenHeight - 1);
-
-		ray r = camera.getRay(x, y);
-		vec4 resultColor = collectColor(r, world);
-		color += resultColor.v;
-		depth += resultColor.w;
+		const u32 offset = SampleNum * index + sampleId;
+		color += renderTargetOfSampleRay[offset];
+		depth += depthTargetOfSampleRay[offset];
 	}
-
 
 	color /= SampleNum;
 	depth /= SampleNum;
@@ -211,34 +256,30 @@ __global__ void castRayToWorld()
 	depthTarget[index] = depth;
 }
 
-
-
 int main()
 {
-	for (u32 i = 0; i < ScreenPixelNum; i++)
-	{
-		renderTarget[i] = vec3(0.0f, 0.0f, 0.0f);
-	}
 	//=======================================================
 	// RayTracing
 	//=======================================================
-	printf("RayTracing Start\n");
 
-	printf("Call prepare<<<1, 1>>>\n");
 	prepare << <1, 1 >> > ();
 	CHECK(cudaDeviceSynchronize());
 
 	//レイを飛ばす
-	dim3 block(16, 16);//スレッドブロック
-	dim3 grid((ScreenWidth + block.x - 1) / block.x, (ScreenHeight + block.y - 1) / block.y);
+	printf("RayTracing Start\n");
 
-	printf("Call castRayToWorld<<<(%d, %d), (%d, %d)>>>\n", grid.x, grid.y, block.x, block.y);
+	dim3 block(16, 16, 1);//スレッドブロック
+	dim3 grid((ScreenWidth + block.x - 1) / block.x, (ScreenHeight + block.y - 1) / block.y, (SampleNum + block.z - 1) / block.z);
 	cudaDeviceSetLimit(cudaLimitStackSize, 4096);
 	castRayToWorld << <grid, block >> > ();
 	CHECK(cudaDeviceSynchronize());
 
-
 	printf("Finish RayTracing\n");
+
+
+	sumUp << <grid, block >> > ();
+	CHECK(cudaDeviceSynchronize());
+	printf("Finish sumup\n");
 
 
 
@@ -246,7 +287,7 @@ int main()
 	// 結果をファイルに出力
 	//=======================================================
 	std::ofstream outputFile("renderResult.ppm");
-	outputFile << "P3\n" << ScreenWidth * 2 << " " << ScreenHeight  << "\n255\n";
+	outputFile << "P3\n" << ScreenWidth * 2 << " " << ScreenHeight << "\n255\n";
 	for (s32 yid = ScreenHeight - 1; yid >= 0; yid--)
 	{
 		for (u32 xid = 0; xid < ScreenWidth; xid++)
@@ -256,7 +297,7 @@ int main()
 			col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
 			outputFile << static_cast<s32>(255.99 * col[0]) << " " << static_cast<s32>(255.99 * col[1]) << " " << static_cast<s32>(255.99 * col[2]) << "\n";
 		}
-		
+
 		for (u32 xid = 0; xid < ScreenWidth; xid++)
 		{
 			const u32 index = yid * ScreenWidth + xid;

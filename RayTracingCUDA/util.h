@@ -4,6 +4,7 @@
 #include "root.h"
 
 __host__  __device__ f64 randomF64();
+__host__  __device__ f64 randomF64(const u32 offset);
 
 __host__  __device__ f64 srandomF64();
 
